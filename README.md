@@ -252,6 +252,81 @@ target that matches what you changed rather than the whole set. The optional add
 compose files live in `docker/` (e.g. `docker/compose.mongo.yaml`), layered on top of the
 default `compose.yaml` so the default stack stays lightweight.
 
+## AI Control Tower Integration
+
+This service includes native integration with the [AI Control Tower](https://github.com/hanishsuri/AI_Control_Tower) governance platform using the official `control_tower_sdk`. When configured, each agent defined in `src/agents/agents.py` is automatically registered with the Control Tower upon service startup, and a single shared background thread emits periodic telemetry heartbeats (default: every 60s) to report agent liveness, detected platform, and region.
+
+If the Control Tower environment variables are missing or the backend is unreachable, the service starts and functions normally without slowdown or crash.
+
+### Environment Variables
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `CONTROL_TOWER_URL` | Base URL of the AI Control Tower backend (e.g. `http://localhost:8000` or `https://control-tower.onrender.com`). | Unset (disabled) |
+| `CONTROL_TOWER_API_KEY` | Workspace API key starting with `act_live_...`. | Unset (disabled) |
+| `CONTROL_TOWER_ENVIRONMENT` | Deployment environment tag reported to Control Tower (e.g. `test`, `staging`, `production`). | `test` |
+| `USE_FAKE_MODEL` | Set to `true` to use a free, mock LLM provider without calling any external API. | `false` |
+| `DEFAULT_MODEL` | Set to `fake` when using `USE_FAKE_MODEL=true` for testing without API keys. | Set by provider |
+
+#### Free Local Test (No API Keys Required)
+
+You can run and test the complete agent service and Control Tower integration locally without paid LLM API keys:
+
+```sh
+export USE_FAKE_MODEL=true
+export DEFAULT_MODEL=fake
+export CONTROL_TOWER_URL=http://localhost:8000
+export CONTROL_TOWER_API_KEY=act_live_YOUR_KEY
+export CONTROL_TOWER_ENVIRONMENT=test
+
+python src/run_service.py
+```
+
+Startup will log:
+
+```text
+Control Tower: registered 10 agents: ['chatbot', 'research-assistant', ...]
+```
+
+### Render Deployment Settings
+
+When deploying the agent service to [Render](https://render.com):
+
+1. **Service Type**: **Web Service**
+2. **Environment**: **Docker**
+3. **Dockerfile Path**: `docker/Dockerfile.service` (Docker build context: `.`)
+4. **Environment Variables**:
+   - `CONTROL_TOWER_URL`: `https://<your-control-tower-app>.onrender.com`
+   - `CONTROL_TOWER_API_KEY`: `act_live_...`
+   - `CONTROL_TOWER_ENVIRONMENT`: `production` (or `staging`)
+   - `PORT`: `8080` (or leave default if mapped by Render)
+   - LLM credentials: e.g. `OPENAI_API_KEY` or `USE_FAKE_MODEL=true` and `DEFAULT_MODEL=fake`
+
+### Verifying Control Tower Registration
+
+Use `scripts/verify_control_tower.py` to confirm all agents are registered and actively reporting heartbeats:
+
+```sh
+# Reads AGENT_URL (default: http://localhost:8080) and CONTROL_TOWER_URL + CONTROL_TOWER_API_KEY from environment
+python scripts/verify_control_tower.py
+
+# Or specify flags explicitly:
+python scripts/verify_control_tower.py \
+  --agent-url http://localhost:8080 \
+  --control-tower-url http://localhost:8000 \
+  --control-tower-api-key act_live_...
+
+# Test invoking each agent via /<agent>/invoke as well:
+python scripts/verify_control_tower.py --invoke
+```
+
+The script:
+
+1. Queries the service's `/info` endpoint to discover all configured agents.
+2. Calls `GET /api/v1/agents?registration_method=sdk&last_seen_within_seconds=180` on the Control Tower.
+3. Prints a PASS/FAIL table showing agent registration, heartbeat elapsed time, detected cloud platform, and region.
+4. Exits with code `0` on success, or non-zero (`1`) if any agent is missing.
+
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.

@@ -10,6 +10,9 @@ COPY uv.lock .
 RUN pip install --no-cache-dir --upgrade "pip>=26.2.2" && pip install --no-cache-dir uv==0.13.5
 RUN uv sync --frozen --no-install-project --no-dev
 
+COPY vendor/ ./vendor/
+RUN uv pip install --system ./vendor/control_tower_sdk-*.whl
+
 COPY src/agents/ ./agents/
 COPY src/core/ ./core/
 COPY src/memory/ ./memory/

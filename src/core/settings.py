@@ -119,6 +119,11 @@ class Settings(BaseSettings):
     LANGFUSE_PUBLIC_KEY: SecretStr | None = None
     LANGFUSE_SECRET_KEY: SecretStr | None = None
 
+    # Control Tower Configuration
+    CONTROL_TOWER_URL: str | None = None
+    CONTROL_TOWER_API_KEY: SecretStr | None = None
+    CONTROL_TOWER_ENVIRONMENT: str = "test"
+
     # Database Configuration
     DATABASE_TYPE: DatabaseType = (
         DatabaseType.SQLITE

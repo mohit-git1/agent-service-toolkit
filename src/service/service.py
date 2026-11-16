@@ -1,6 +1,7 @@
 import inspect
 import json
 import logging
+import os
 import warnings
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -28,7 +29,16 @@ from langgraph.types import Command, Interrupt
 from langsmith import Client as LangsmithClient
 from langsmith import uuid7
 
-from agents import DEFAULT_AGENT, AgentGraph, get_agent, get_all_agent_info, load_agent
+from agents import (
+    DEFAULT_AGENT,
+    AgentGraph,
+    get_agent,
+    get_all_agent_info,
+    load_agent,
+)
+from agents import (
+    agents as agent_dict,
+)
 from core import settings
 from memory import initialize_database, initialize_store
 from schema import (
@@ -98,8 +108,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 )
 
             # Configure agents with both memory components and async loading
-            agents = get_all_agent_info()
-            for a in agents:
+            agent_infos = get_all_agent_info()
+            for a in agent_infos:
                 try:
                     await load_agent(a.key)
                     logger.info(f"Agent loaded: {a.key}")
@@ -112,7 +122,75 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 agent.checkpointer = saver
                 # Set store for long-term memory (cross-conversation knowledge)
                 agent.store = store
-            yield
+
+            control_tower = None
+            ct_url = os.getenv("CONTROL_TOWER_URL") or (
+                settings.CONTROL_TOWER_URL if getattr(settings, "CONTROL_TOWER_URL", None) else None
+            )
+            ct_api_key = os.getenv("CONTROL_TOWER_API_KEY") or (
+                settings.CONTROL_TOWER_API_KEY.get_secret_value()
+                if getattr(settings, "CONTROL_TOWER_API_KEY", None)
+                else None
+            )
+
+            if not ct_url or not ct_api_key:
+                msg = "Control Tower: disabled (CONTROL_TOWER_URL and/or CONTROL_TOWER_API_KEY not set)"
+                logger.warning(msg)
+                print(msg, flush=True)
+            else:
+                try:
+                    from control_tower_sdk import ControlTower
+
+                    ct_env = (
+                        os.getenv("CONTROL_TOWER_ENVIRONMENT")
+                        or getattr(settings, "CONTROL_TOWER_ENVIRONMENT", "test")
+                        or "test"
+                    )
+                    default_model = (
+                        getattr(settings.DEFAULT_MODEL, "value", str(settings.DEFAULT_MODEL))
+                        if settings.DEFAULT_MODEL
+                        else None
+                    )
+                    llms = [str(default_model)] if default_model else []
+
+                    control_tower = ControlTower(
+                        url=ct_url,
+                        api_key=ct_api_key,
+                        environment=ct_env,
+                        allow_insecure=True,
+                    )
+
+                    registered_names: list[str] = []
+                    for agent_key, agent_obj in agent_dict.items():
+                        desc = getattr(agent_obj, "description", None) or None
+                        handle = control_tower.agent(
+                            name=agent_key,
+                            description=desc,
+                            framework="langgraph",
+                            environment=ct_env,
+                            llms=llms,
+                        )
+                        handle.register()
+                        registered_names.append(agent_key)
+
+                    control_tower.start()
+                    msg = f"Control Tower: registered {len(registered_names)} agents: {registered_names}"
+                    logger.info(msg)
+                    print(msg, flush=True)
+                except Exception as e:
+                    msg = f"Control Tower: disabled (SDK initialization failed: {e})"
+                    logger.warning(msg)
+                    print(msg, flush=True)
+                    control_tower = None
+
+            try:
+                yield
+            finally:
+                if control_tower is not None:
+                    try:
+                        control_tower.stop()
+                    except Exception as e:
+                        logger.warning(f"Control Tower: error stopping heartbeat: {e}")
     except Exception as e:
         logger.error(f"Error during database/store/agents initialization: {e}")
         raise

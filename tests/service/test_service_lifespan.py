@@ -75,3 +75,122 @@ async def test_lifespan(monkeypatch, caplog) -> None:
 
     assert "Agent loaded: good" in caplog.text
     assert "Failed to load agent bad: boom" in caplog.text
+    assert "Control Tower: disabled" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_lifespan_control_tower_enabled(monkeypatch, caplog) -> None:
+    import sys
+
+    from service import service
+
+    @asynccontextmanager
+    async def fake_initialize_database():
+        yield type("Saver", (), {})()
+
+    @asynccontextmanager
+    async def fake_initialize_store():
+        yield type("Store", (), {})()
+
+    monkeypatch.setattr(service, "initialize_database", fake_initialize_database)
+    monkeypatch.setattr(service, "initialize_store", fake_initialize_store)
+    monkeypatch.setattr(service, "load_agent", lambda k: None)
+    monkeypatch.setattr(
+        service, "get_agent", lambda k: type("Agent", (), {"checkpointer": None, "store": None})()
+    )
+    monkeypatch.setattr(service, "get_all_agent_info", lambda: [])
+
+    monkeypatch.setenv("CONTROL_TOWER_URL", "http://localhost:8000")
+    monkeypatch.setenv("CONTROL_TOWER_API_KEY", "act_live_test_key")
+    monkeypatch.setenv("CONTROL_TOWER_ENVIRONMENT", "test")
+
+    registered = []
+    started = False
+    stopped = False
+
+    class FakeHandle:
+        def __init__(self, name, description, framework, environment, llms):
+            self.name = name
+            self.description = description
+            self.framework = framework
+            self.environment = environment
+            self.llms = llms
+
+        def register(self):
+            registered.append(self)
+            return f"agent-{self.name}"
+
+    class FakeControlTower:
+        def __init__(self, url, api_key, environment, allow_insecure=True):
+            self.url = url
+            self.api_key = api_key
+            self.environment = environment
+
+        def agent(self, name, description, framework, environment, llms):
+            return FakeHandle(name, description, framework, environment, llms)
+
+        def start(self):
+            nonlocal started
+            started = True
+            return self
+
+        def stop(self):
+            nonlocal stopped
+            stopped = True
+
+    fake_module = type("FakeModule", (), {"ControlTower": FakeControlTower})
+    monkeypatch.setitem(sys.modules, "control_tower_sdk", fake_module)
+
+    caplog.set_level(logging.INFO, logger=service.logger.name)
+
+    async with service.lifespan(FastAPI()):
+        assert started is True
+        assert stopped is False
+        assert len(registered) == len(service.agent_dict)
+        for h in registered:
+            assert h.name in service.agent_dict
+            assert h.framework == "langgraph"
+            assert h.environment == "test"
+
+    assert stopped is True
+    assert f"Control Tower: registered {len(registered)} agents:" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_lifespan_control_tower_sdk_failure(monkeypatch, caplog) -> None:
+    import sys
+
+    from service import service
+
+    @asynccontextmanager
+    async def fake_initialize_database():
+        yield type("Saver", (), {})()
+
+    @asynccontextmanager
+    async def fake_initialize_store():
+        yield type("Store", (), {})()
+
+    monkeypatch.setattr(service, "initialize_database", fake_initialize_database)
+    monkeypatch.setattr(service, "initialize_store", fake_initialize_store)
+    monkeypatch.setattr(service, "load_agent", lambda k: None)
+    monkeypatch.setattr(
+        service, "get_agent", lambda k: type("Agent", (), {"checkpointer": None, "store": None})()
+    )
+    monkeypatch.setattr(service, "get_all_agent_info", lambda: [])
+
+    monkeypatch.setenv("CONTROL_TOWER_URL", "http://localhost:8000")
+    monkeypatch.setenv("CONTROL_TOWER_API_KEY", "act_live_test_key")
+
+    class CrashingControlTower:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("SDK Boom")
+
+    fake_module = type("FakeModule", (), {"ControlTower": CrashingControlTower})
+    monkeypatch.setitem(sys.modules, "control_tower_sdk", fake_module)
+
+    caplog.set_level(logging.INFO, logger=service.logger.name)
+
+    async with service.lifespan(FastAPI()):
+        pass
+
+    assert "Control Tower: disabled (SDK initialization failed: SDK Boom)" in caplog.text
