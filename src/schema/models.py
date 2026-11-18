@@ -95,6 +95,18 @@ class OllamaModelName(StrEnum):
 class OpenRouterModelName(StrEnum):
     """https://openrouter.ai/models"""
 
+    # Popular real models on OpenRouter
+    GPT_4O_MINI = "openai/gpt-4o-mini"
+    GPT_4O = "openai/gpt-4o"
+    CLAUDE_3_5_SONNET = "anthropic/claude-3.5-sonnet"
+    CLAUDE_3_5_HAIKU = "anthropic/claude-3.5-haiku"
+    GEMINI_FLASH_1_5 = "google/gemini-flash-1.5"
+    GEMINI_2_0_FLASH = "google/gemini-2.0-flash-exp:free"
+    LLAMA_3_3_70B = "meta-llama/llama-3.3-70b-instruct"
+    DEEPSEEK_CHAT = "deepseek/deepseek-chat"
+    DEEPSEEK_R1 = "deepseek/deepseek-r1"
+
+    # Upstream defaults
     GEMINI_35_FLASH = "google/gemini-3.5-flash"
     GEMINI_36_FLASH = "google/gemini-3.6-flash"
     GEMINI_37_FLASH = "google/gemini-3.7-flash"
