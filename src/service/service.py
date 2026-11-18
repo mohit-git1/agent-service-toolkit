@@ -2,6 +2,7 @@ import inspect
 import json
 import logging
 import os
+import time
 import warnings
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -65,6 +66,10 @@ from service.utils import (
 
 warnings.filterwarnings("ignore", category=LangChainBetaWarning)
 logger = logging.getLogger(__name__)
+
+_control_tower: Any | None = None
+_agent_handles: dict[str, Any] = {}
+
 
 
 def custom_generate_unique_id(route: APIRoute) -> str:
@@ -160,6 +165,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                         allow_insecure=True,
                     )
 
+                    global _control_tower, _agent_handles
+                    _control_tower = control_tower
                     registered_names: list[str] = []
                     for agent_key, agent_obj in agent_dict.items():
                         desc = getattr(agent_obj, "description", None) or None
@@ -171,6 +178,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                             llms=llms,
                         )
                         handle.register()
+                        _agent_handles[agent_key] = handle
                         registered_names.append(agent_key)
 
                     control_tower.start()
@@ -294,10 +302,12 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
     # in that case.
     agent: AgentGraph = get_agent(agent_id)
     kwargs, run_id = await _handle_input(user_input, agent, agent_id)
+    t0 = time.perf_counter()
 
     try:
         response_events: list[tuple[str, Any]] = await agent.ainvoke(**kwargs, stream_mode=["updates", "values"])  # type: ignore # fmt: skip
         response_type, response = response_events[-1]
+        latency_ms = (time.perf_counter() - t0) * 1000.0
         # A run that stops on an interrupt reports it on the final event of either stream
         # mode, so check for the interrupt before falling back to the last message.
         if "__interrupt__" in response:
@@ -312,8 +322,74 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
             raise ValueError(f"Unexpected response type: {response_type}")
 
         output.run_id = str(run_id)
+
+        # Emit LLM usage telemetry to Control Tower
+        if _control_tower:
+            try:
+                in_tok = 0
+                out_tok = 0
+                model_name = getattr(user_input, "model", None) or getattr(
+                    settings.DEFAULT_MODEL, "value", str(settings.DEFAULT_MODEL)
+                )
+                if isinstance(response, dict) and "messages" in response:
+                    for m in response["messages"]:
+                        usage = getattr(m, "usage_metadata", None) or {}
+                        if usage:
+                            in_tok += usage.get("input_tokens", 0)
+                            out_tok += usage.get("output_tokens", 0)
+                        elif hasattr(m, "response_metadata") and m.response_metadata:
+                            tok = m.response_metadata.get("token_usage") or {}
+                            in_tok += tok.get("prompt_tokens", 0)
+                            out_tok += tok.get("completion_tokens", 0)
+                            if not model_name:
+                                model_name = m.response_metadata.get("model_name")
+                handle = _agent_handles.get(agent_id)
+                provider = (
+                    "openrouter"
+                    if "openrouter" in str(model_name).lower() or getattr(settings, "OPENROUTER_API_KEY", None)
+                    else "openai"
+                )
+                if handle:
+                    handle.track_llm_call(
+                        provider=provider,
+                        model=str(model_name),
+                        input_tokens=in_tok,
+                        output_tokens=out_tok,
+                        latency_ms=round(latency_ms, 2),
+                        status="success",
+                    )
+                else:
+                    _control_tower.track_llm_call(
+                        provider=provider,
+                        model=str(model_name),
+                        input_tokens=in_tok,
+                        output_tokens=out_tok,
+                        latency_ms=round(latency_ms, 2),
+                        status="success",
+                        agent_id=agent_id,
+                    )
+                _control_tower.flush_events()
+            except Exception as ct_err:
+                logger.warning(f"Control Tower telemetry error: {ct_err}")
+
         return output
     except Exception as e:
+        if _control_tower:
+            try:
+                handle = _agent_handles.get(agent_id)
+                latency_ms = (time.perf_counter() - t0) * 1000.0
+                model_name = str(getattr(user_input, "model", None) or settings.DEFAULT_MODEL)
+                if handle:
+                    handle.track_llm_call(
+                        provider="openrouter" if getattr(settings, "OPENROUTER_API_KEY", None) else "openai",
+                        model=model_name,
+                        latency_ms=round(latency_ms, 2),
+                        status="error",
+                        error_message=str(e)[:500],
+                    )
+                    _control_tower.flush_events()
+            except Exception:
+                pass
         logger.error(f"An exception occurred: {e}")
         raise HTTPException(status_code=500, detail="Unexpected error")
 
